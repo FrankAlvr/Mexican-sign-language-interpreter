@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LSM Real-Time Interpreter</title>
+
+  <!-- Bootstrap 5 -->
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.2/dist/css/bootstrap.min.css" rel="stylesheet">
+
+  <style>
+    /* ── Layout ── */
+    body {
+      background-color: #f5f5f5;
+    }
+
+    .header-bar {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 1rem 2rem;
+      border-bottom: 1px solid #dee2e6;
+      background: #fff;
+    }
+
+    .header-bar img {
+      height: 80px;
+      width: auto;
+    }
+
+    .header-bar .title-block {
+      flex-grow: 1;
+      text-align: center;
+    }
+
+    /* ── Canvas & prediction ── */
+    #canvas {
+      border: 2px solid #dee2e6;
+      border-radius: 8px;
+      max-width: 100%;
+    }
+
+    #resultado {
+      font-size: 4rem;
+      font-weight: bold;
+      text-align: center;
+      color: #1f3864;
+      margin-top: 1rem;
+      min-height: 5rem;
+    }
+
+    /* ── Probability list ── */
+    .prob-list {
+      background: #fff;
+      border: 1px solid #dee2e6;
+      border-radius: 8px;
+      padding: 1rem;
+      margin-top: 1rem;
+      font-size: 0.9rem;
+    }
+
+    .prob-item {
+      display: flex;
+      justify-content: space-between;
+      padding: 3px 0;
+      border-bottom: 1px solid #f0f0f0;
+    }
+
+    .prob-item:last-child {
+      border-bottom: none;
+    }
+
+    /* ── Controls ── */
+    .btn-control {
+      min-width: 120px;
+    }
+
+    /* ── Footer ── */
+    .footer {
+      background: #212529;
+      color: #adb5bd;
+      padding: 2rem 1rem;
+      text-align: center;
+    }
+
+    .footer h2 {
+      color: #fff;
+    }
+  </style>
+</head>
+
+<body>
+
+  <!-- ── Header ── -->
+  <div class="header-bar">
+    <img src="upiita-logo.png" alt="UPIITA Logo">
+    <div class="title-block">
+      <h1 class="h4 fw-bold mb-0">Mexican Sign Language Real-Time Interpreter</h1>
+      <p class="text-muted mb-0 small">Terminal Work II — Instituto Politécnico Nacional</p>
+    </div>
+    <img src="ipn.png" alt="IPN Logo">
+  </div>
+
+  <!-- ── Main content ── -->
+  <main class="container my-4">
+    <div class="row justify-content-center">
+      <div class="col-12 col-md-6 text-center">
+
+        <!-- Hidden video element (webcam source) -->
+        <video id="video" playsinline autoplay style="width: 1px; height: 1px;"></video>
+
+        <!-- Main canvas — shows cropped hand region -->
+        <canvas id="canvas" width="400" height="400"></canvas>
+
+        <!-- Hidden canvas used for resizing before inference -->
+        <canvas id="canvas2" width="200" height="200" style="display:none;"></canvas>
+
+        <!-- Prediction result -->
+        <div id="resultado">—</div>
+
+        <!-- Controls -->
+        <div class="d-flex gap-2 justify-content-center mt-3">
+          <button class="btn btn-success btn-control" onclick="startSystem()">▶ Start</button>
+          <button class="btn btn-danger  btn-control" onclick="stopSystem()">■ Stop</button>
+        </div>
+
+        <!-- Probability list -->
+        <div class="prob-list mt-4" id="prob-container">
+          <strong>Class probabilities</strong>
+          <div id="prob-list-body" class="mt-2"></div>
+        </div>
+
+      </div>
+    </div>
+  </main>
+
+  <!-- ── Footer ── -->
+  <footer class="footer">
+    <h2 class="h5">Instituto Politécnico Nacional</h2>
+    <p class="mb-1">Designed and developed by: Francisco Javier Alvarado Angeles</p>
+    <p class="mb-0 small">Advisors: Dr. Rene Luna García &nbsp;|&nbsp; Dra. Obdulia Lagunas Pichardo</p>
+  </footer>
+
+  <!-- Bootstrap JS -->
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.0.2/dist/js/bootstrap.bundle.min.js"></script>
+
+  <!-- TensorFlow.js -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+
+  <script>
+    // ── Constants ────────────────────────────────────────────────────────────
+    const SERVER_URL     = 'http://127.0.0.1:5000';
+    const UPDATE_INTERVAL = 100;   // ms between inference calls
+    const CANVAS_SIZE    = 400;
+    const INFER_SIZE     = 200;
+
+    const LABELS = [
+      'NoPrediccion', 'Hola', 'Como', 'Estar', 'Bien', 'Gracias',
+      'Que', 'Hacer', 'Tu', 'Tambien', 'Comer', 'Trabajar',
+      'Mal', 'Si', 'No', 'Adios'
+    ];
+
+    // ── State ────────────────────────────────────────────────────────────────
+    const canvas  = document.getElementById('canvas');
+    const canvas2 = document.getElementById('canvas2');
+    const ctx     = canvas.getContext('2d',  { willReadFrequently: true });
+    const ctx2    = canvas2.getContext('2d', { willReadFrequently: true });
+
+    let model          = null;
+    let isRunning      = false;
+    let lastImageUrl   = '';
+    let lastUpdateTime = 0;
+
+    // ── System controls ──────────────────────────────────────────────────────
+
+    async function startSystem() {
+      try {
+        const res = await fetch(`${SERVER_URL}/start_detection`, { method: 'POST' });
+        if (!res.ok) { console.error('Failed to start detection server.'); return; }
+        isRunning = true;
+        if (!model) await loadModel();
+        requestAnimationFrame(update);
+      } catch (err) {
+        console.error('Connection error:', err);
+      }
+    }
+
+    async function stopSystem() {
+      try {
+        const res = await fetch(`${SERVER_URL}/stop_detection`, { method: 'POST' });
+        if (res.ok) {
+          isRunning = false;
+          document.getElementById('resultado').textContent = '—';
+          document.getElementById('prob-list-body').innerHTML = '';
+        }
+      } catch (err) {
+        console.error('Connection error:', err);
+      }
+    }
+
+    // ── Model loading ────────────────────────────────────────────────────────
+
+    async function loadModel() {
+      console.log('Loading model...');
+      model = await tf.loadLayersModel('model.json');
+      console.log('Model loaded.');
+    }
+
+    // ── Image fetching ───────────────────────────────────────────────────────
+
+    function loadLatestImage() {
+      return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.crossOrigin = 'Anonymous';
+        const url = `${SERVER_URL}/latest_image?t=${Date.now()}`;
+
+        img.onload = () => {
+          if (url !== lastImageUrl) {
+            lastImageUrl = url;
+            ctx.drawImage(img, 0, 0, CANVAS_SIZE, CANVAS_SIZE);
+            resolve(true);
+          } else {
+            resolve(false);
+          }
+        };
+        img.onerror = () => reject(new Error('Image load failed'));
+        img.src = url;
+      });
+    }
+
+    // ── Main update loop ─────────────────────────────────────────────────────
+
+    async function update() {
+      const now = Date.now();
+      if (now - lastUpdateTime > UPDATE_INTERVAL) {
+        try {
+          const hasNew = await loadLatestImage();
+          if (hasNew) await runInference();
+          lastUpdateTime = now;
+        } catch (err) {
+          console.error('Update error:', err);
+        }
+      }
+      requestAnimationFrame(update);
+    }
+
+    // ── Inference ────────────────────────────────────────────────────────────
+
+    async function runInference() {
+      if (!model) return;
+
+      // Resize canvas to inference size
+      ctx2.drawImage(canvas, 0, 0, INFER_SIZE, INFER_SIZE);
+      const imgData = ctx2.getImageData(0, 0, INFER_SIZE, INFER_SIZE);
+
+      // Build per-channel arrays
+      const arr_r = [], arr_g = [], arr_b = [], arr_bn = [];
+      let row_r = [], row_g = [], row_b = [], row_bn = [];
+
+      for (let p = 0; p < imgData.data.length; p += 4) {
+        const r  = imgData.data[p]     / 255;
+        const g  = imgData.data[p + 1] / 255;
+        const b  = imgData.data[p + 2] / 255;
+        const bn = (r + g + b) / 3;
+
+        row_r.push([r]); row_g.push([g]); row_b.push([b]); row_bn.push([bn]);
+
+        if (row_r.length === INFER_SIZE) {
+          arr_r.push(row_r);  row_r  = [];
+          arr_g.push(row_g);  row_g  = [];
+          arr_b.push(row_b);  row_b  = [];
+          arr_bn.push(row_bn); row_bn = [];
+        }
+      }
+
+      // Create tensors
+      const t_r  = tf.tensor4d([arr_r],  [1, INFER_SIZE, INFER_SIZE, 1]);
+      const t_g  = tf.tensor4d([arr_g],  [1, INFER_SIZE, INFER_SIZE, 1]);
+      const t_b  = tf.tensor4d([arr_b],  [1, INFER_SIZE, INFER_SIZE, 1]);
+      const t_bn = tf.tensor4d([arr_bn], [1, INFER_SIZE, INFER_SIZE, 1]);
+
+      // Run model
+      const output = await model.predict([t_r, t_g, t_b, t_bn]).data();
+
+      // Clean up tensors
+      [t_r, t_g, t_b, t_bn].forEach(t => t.dispose());
+
+      // Display top prediction
+      const maxIndex = Array.from(output).indexOf(Math.max(...output));
+      document.getElementById('resultado').textContent = LABELS[maxIndex];
+
+      // Display all probabilities
+      const listBody = document.getElementById('prob-list-body');
+      listBody.innerHTML = LABELS.slice(1).map((label, i) => {
+        const prob = (output[i + 1] * 100).toFixed(2);
+        return `<div class="prob-item"><span>${label}</span><span>${prob}%</span></div>`;
+      }).join('');
+
+      console.log(`Prediction: ${LABELS[maxIndex]} (${(output[maxIndex] * 100).toFixed(1)}%)`);
+    }
+
+    // ── Auto-load model on page load ─────────────────────────────────────────
+    (async () => { await loadModel(); })();
+  </script>
+
+</body>
+</html>
